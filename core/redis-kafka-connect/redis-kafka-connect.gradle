@@ -56,6 +56,10 @@ task relocateShadowJar(type: ConfigureShadowRelocation) {
 }
 
 tasks.shadowJar.dependsOn tasks.relocateShadowJar
+tasks.shadowJar {
+    // Include SPI entries so Kafka Connect can discover the connector in plugin path
+    mergeServiceFiles()
+}
 
 compileJava {
     options.release = 8
