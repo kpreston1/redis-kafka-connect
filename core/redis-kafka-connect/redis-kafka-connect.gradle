@@ -42,11 +42,23 @@ eclipse {
 
 jar.finalizedBy shadowJar
 
-tasks.named('shadowJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
-    enableRelocation true
-    relocationPrefix "com.redis.kafka.connect.shaded"
-    relocate 'org.springframework.batch.core', 'org.springframework.batch.core'
+import com.github.jengelman.gradle.plugins.shadow.tasks.ConfigureShadowRelocation
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+task relocateShadowJar(type: ConfigureShadowRelocation) {
+    target = tasks.shadowJar
+    prefix = "com.redis.kafka.connect.shaded"
+}
+
+tasks.shadowJar.dependsOn tasks.relocateShadowJar
+tasks.shadowJar {
+    // Include SPI entries so Kafka Connect can discover the connector in plugin path
     mergeServiceFiles()
+}
+
+compileJava {
+    options.release = 8
 }
 
 def archiveFilename = "redis-redis-kafka-connect"

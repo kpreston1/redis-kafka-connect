@@ -315,6 +315,9 @@ public class RedisSinkTask extends SinkTask {
     @SuppressWarnings("unchecked")
     private Map<byte[], byte[]> map(SinkRecord sinkRecord) {
         Object value = sinkRecord.value();
+        if (value == null) {
+            return Collections.emptyMap();
+        }
         if (value instanceof Struct) {
             Map<byte[], byte[]> body = new LinkedHashMap<>();
             Struct struct = (Struct) value;
@@ -334,7 +337,39 @@ public class RedisSinkTask extends SinkTask {
             }
             return body;
         }
+        if (value instanceof String) {
+            String stringValue = ((String) value).trim();
+            if (stringValue.isEmpty() || "null".equalsIgnoreCase(stringValue)) {
+                return Collections.emptyMap();
+            }
+        }
         throw new ConnectException("Unsupported source value type: " + sinkRecord.valueSchema().type().name());
+    }
+
+    private boolean isNullStringValue(Object value) {
+        if (!(value instanceof String)) {
+            return false;
+        }
+        String stringValue = ((String) value).trim();
+        return stringValue.isEmpty() || "null".equalsIgnoreCase(stringValue);
+    }
+
+    private boolean shouldDelete(SinkRecord record) {
+        Object value = record.value();
+        return value == null || isNullStringValue(value);
+    }
+
+    private byte[] deleteKey(SinkRecord record) {
+        switch (config.getCommand()) {
+            case XADD:
+            case LPUSH:
+            case RPUSH:
+            case SADD:
+            case ZADD:
+                return collectionKey(record);
+            default:
+                return key(record);
+        }
     }
 
     @Override
@@ -354,8 +389,34 @@ public class RedisSinkTask extends SinkTask {
     @Override
     public void put(final Collection<SinkRecord> records) {
         log.debug("Processing {} records", records.size());
+        List<SinkRecord> deletes = new ArrayList<>();
+        List<SinkRecord> writes = new ArrayList<>();
+        for (SinkRecord r : records) {
+            if (shouldDelete(r)) {
+                deletes.add(r);
+            } else {
+                writes.add(r);
+            }
+        }
         try {
-            writer.write(new Chunk<>(new ArrayList<>(records)));
+            if (!writes.isEmpty()) {
+                writer.write(new ArrayList<>(writes));
+                log.info("Wrote {} records", writes.size());
+            }
+            if (!deletes.isEmpty()) {
+                Del<byte[], byte[], SinkRecord> del = new Del<>();
+                del.setKeyFunction(this::deleteKey);
+                OperationItemWriter<byte[], byte[], SinkRecord> delWriter =
+                        new OperationItemWriter<>(client, ByteArrayCodec.INSTANCE, del);
+                delWriter.setMultiExec(config.isMultiExec());
+                delWriter.setWaitReplicas(config.getWaitReplicas());
+                delWriter.setWaitTimeout(config.getWaitTimeout());
+                delWriter.setPoolSize(config.getPoolSize());
+                delWriter.open(new ExecutionContext());
+                delWriter.write(new ArrayList<>(deletes));
+                delWriter.close();
+                log.info("Deleted {} records", deletes.size());
+            }
         } catch (RedisConnectionException e) {
             throw new RetriableException("Could not get connection to Redis", e);
         } catch (RedisCommandTimeoutException e) {
