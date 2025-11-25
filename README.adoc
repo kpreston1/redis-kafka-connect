@@ -21,6 +21,114 @@ Documentation is available at link:{doc-url}[{doc-url}].
 
 The connector is published on https://www.confluent.io/hub/redis/redis-kafka-connect[Confluent Hub] and {project-url}/releases/latest[Github].
 
+== Build for Amazon MSK Connect (v0.9.1 backport)
+
+This section documents how to build a Confluent Hub–style ZIP that MSK Connect can load, including the required SPI entry and the Gradle tasks to produce the fat JAR and archive.
+
+=== Summary of code changes (backport)
+
+- Added delete-on-null handling in `RedisSinkTask`:
+  - Treats `null`, empty, or literal `"null"` values as deletes (issues `DEL`).
+  - Keeps normal records on the original write path.
+- Added Kafka Connect SPI services entry so the connector is discoverable:
+  - File: `core/redis-kafka-connect/src/main/resources/META-INF/services/org.apache.kafka.connect.connector.Connector`
+  - Content:
+    ```
+    com.redis.kafka.connect.RedisSinkConnector
+    ```
+- Ensured ShadowJar merges service files:
+  - In `core/redis-kafka-connect/redis-kafka-connect.gradle`:
+    [source,gradle]
+    ----
+    tasks.shadowJar.dependsOn tasks.relocateShadowJar
+    tasks.shadowJar {
+        mergeServiceFiles()
+    }
+    ----
+
+=== Build commands
+
+[source,console]
+----
+# Ensure you are on the backport branch (example)
+git checkout backport/null-delete-v0.9.1
+
+# Build the fat JAR (relocated) and Confluent ZIP
+./gradlew :redis-kafka-connect:clean :redis-kafka-connect:shadowJar -x test
+./gradlew :redis-kafka-connect:createConfluentArchive
+----
+
+Artifacts:
+
+- Fat JAR:
+  - `core/redis-kafka-connect/build/libs/redis-kafka-connect-0.9.1-all.jar`
+- Confluent ZIP (upload this to MSK Connect):
+  - `core/redis-kafka-connect/build/confluent/redis-redis-kafka-connect-0.9.1.zip`
+
+=== Verify SPI inside artifacts
+
+[source,console]
+----
+# Verify SPI and connector class in the fat JAR
+jar tf core/redis-kafka-connect/build/libs/redis-kafka-connect-0.9.1-all.jar \
+  | egrep -i "META-INF/services/org.apache.kafka.connect.connector.Connector|com/redis/kafka/connect/RedisSinkConnector.class"
+
+# Inspect jar inside the Confluent ZIP
+unzip -o -q core/redis-kafka-connect/build/confluent/redis-redis-kafka-connect-0.9.1.zip \
+  -d core/redis-kafka-connect/build/confluent/extracted
+jar tf core/redis-kafka-connect/build/confluent/extracted/redis-redis-kafka-connect-0.9.1/lib/redis-kafka-connect-0.9.1-all.jar \
+  | egrep -i "META-INF/services/org.apache.kafka.connect.connector.Connector|com/redis/kafka/connect/RedisSinkConnector.class"
+----
+
+=== Version-specific configuration (v0.9.1)
+
+v0.9.1 uses `redis.command` and `redis.key` (not `redis.type` / `redis.keyspace`).
+
+- For String payloads (with `StringConverter`) use `SET`:
+
+[source,properties]
+----
+connector.class=com.redis.kafka.connect.RedisSinkConnector
+tasks.max=2
+topics=your-topic
+
+key.converter=org.apache.kafka.connect.json.JsonConverter
+key.converter.schemas.enable=false
+value.converter=org.apache.kafka.connect.storage.StringConverter
+value.converter.schemas.enable=false
+
+# SMTs (example: derive Kafka key from a field)
+transforms=extractKey,castKey
+transforms.extractKey.type=org.apache.kafka.connect.transforms.ExtractField$Key
+transforms.extractKey.field=screen_locations_id
+transforms.castKey.type=org.apache.kafka.connect.transforms.Cast$Key
+transforms.castKey.spec=string
+
+redis.uri=redis://HOST:PORT
+redis.insecure=true
+redis.command=SET
+redis.key=screen-location:eligibilityv2
+redis.separator=:
+
+errors.tolerance=all
+errors.log.enable=true
+errors.log.include.messages=true
+----
+
+Notes:
+
+- The backport will delete on tombstones (`null`) and on values that are empty or the literal `"null"` (case-insensitive).
+- If you use collection commands (e.g., `XADD`, `HSET`), ensure your values are structured (JSON/Struct) rather than plain strings.
+
+=== Networking tips for MSK Connect
+
+If workers log timeouts resolving or connecting to brokers:
+
+- Ensure the connector runs in the same VPC/subnets as the MSK cluster.
+- MSK SG must allow inbound TCP 9098 from the MSK Connect worker SG; workers must allow egress.
+- Use IAM endpoints (port 9098) and let MSK Connect inject SASL/IAM when you select the MSK cluster.
+- VPC DNS hostnames/resolution must be enabled.
+
 == Support
 
 {project-name} is supported by Redis, Inc. for enterprise-tier customers as a 'Developer Tool' under the https://redis.io/legal/software-support-policy/[Redis Software Support Policy.] For non enterprise-tier customers we supply support for {project-name} on a good-faith basis.
